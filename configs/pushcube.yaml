@@ -1,0 +1,30 @@
+seed: 42
+environment:
+  id: PushCube-v1
+  robot: panda
+  backend: physx_cuda
+  observation_mode: rgb
+  control_mode: pd_joint_delta_pos
+  num_envs: 64
+  max_episode_steps: 100
+data:
+  image_size: [128, 128]
+  sequence_length: 16
+  frame_stride: 1
+  train_split: 0.9
+model:
+  latent_dim: 256
+  action_embedding_dim: 64
+  dynamics: mlp
+  prediction_horizon: 5
+training:
+  batch_size: 64
+  learning_rate: 0.0003
+  epochs: 50
+planning:
+  method: cem
+  horizon: 10
+  population: 512
+  elites: 64
+  iterations: 5
+

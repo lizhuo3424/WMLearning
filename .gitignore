@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+outputs/
+demos/
+checkpoints/
+runs/
+*.h5
+*.mp4
+
