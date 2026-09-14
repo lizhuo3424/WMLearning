@@ -1,110 +1,48 @@
-# PushCube Latent World Model
+# WMLearning：具身世界模型实验
 
-第一阶段目标：在 ManiSkill `PushCube-v1` 中跑通 GPU 仿真、下载官方示范轨迹，并回放为包含 RGB、机器人状态、动作和奖励的训练数据。
+面向世界模型 / 具身智能算法实习的可复现实验仓库。项目以 ManiSkill 3 的官方机器人操作示范为数据源，覆盖确定性潜空间动力学与生成式 action-conditioned flow video world model 两条路线。
 
-## 推荐云服务器
+## 已完成实验
 
-- Ubuntu 22.04
-- NVIDIA RTX 4090 24 GB
-- 8 vCPU 或更多
-- 32 GB RAM（建议 64 GB）
-- 100 GB SSD（建议 200 GB，便于保存 RGB 轨迹和 checkpoint）
-- NVIDIA 驱动正常，`nvidia-smi` 可用
-- Vulkan 可用，`vulkaninfo --summary` 能识别 NVIDIA GPU
+### 1. PushCube 潜空间世界模型与控制对照
 
-## 1. 创建环境
+- GPU 回放官方 motion-planning 示范，成功保存 975 条 RGB、state、action 轨迹；
+- CNN autoencoder + action-conditioned latent dynamics，完成单步训练和 5-step rollout 微调；
+- 在 98 条 held-out trajectory、5,888 个起点上，10-step state MSE：action-conditioned `0.005832`，zero-action `5.358248`；
+- 修复官方示范时长与环境默认 50-step 截断不一致的问题，统一按 100-step 控制协议评测；
+- 特权状态 kNN action-chunk 检索基线（chunk=2）在固定 20 seeds 达到 70% success rate、平均最终 cube-goal 距离 `0.120881 m`。
 
-```bash
-conda create -n worldmodel python=3.11 -y
-conda activate worldmodel
-python -m pip install --upgrade pip
-```
+### 2. PickCube Action-Conditioned Flow Video World Model
 
-先根据云镜像的 CUDA 版本，从 PyTorch 官网选择对应安装命令。随后安装：
+- GPU 回放 1,000/1,000 条官方 motion-planning 示范；
+- CNN autoencoder + conditional flow matching：通过当前视觉 latent、25-d proprioception（qpos/qvel/TCP）和连续动作条件化向量场，从噪声积分采样下一视觉 latent；
+- 不使用 simulator object / goal state。在 100 条 held-out trajectory、3,200 个起点上，10-step proprioception state MSE：action-conditioned `0.003205`，zero-action `0.040061`；
+- 生成 input / prediction / ground-truth 三栏自回归 rollout 视频。
+
+## 重要口径
+
+- 所有训练/验证切分均按完整 trajectory 进行，避免相邻帧泄漏；
+- `rgb+state` 的扁平 state 含 simulator object / goal pose。PickCube 主实验严格只取前 25 维 proprioception；
+- kNN 是特权状态诊断基线，不应表述为视觉策略或世界模型规划成功率；
+- 当前 CEM 存在 model exploitation，结果与失败边界都保留在实验日志中，不将其包装为有效控制器。
+
+## 快速开始
+
+建议 Ubuntu 22.04、NVIDIA GPU 和可用 Vulkan。先安装匹配 CUDA 的 PyTorch，再安装依赖：
 
 ```bash
 pip install -r requirements.txt
-```
-
-当前云端已验证组合：Python 3.10、PyTorch 2.7.1 + CUDA 12.8、ManiSkill 3.0.1、SAPIEN 3.0.3、RTX 5090。PyTorch CUDA wheel 需要按 [PyTorch 官方安装页](https://pytorch.org/get-started/locally/) 选择匹配的 index；不要让 `pip install torch` 静默替换为 CPU wheel。
-
-## 2. 检查 GPU 仿真
-
-本云实例在无桌面容器中需要使用 EGL Vulkan ICD；不要覆盖系统的 NVIDIA 驱动文件。项目内已提供可回退配置，先在每个新 SSH shell 中执行：
-
-```bash
 export XDG_RUNTIME_DIR=/tmp
 export VK_ICD_FILENAMES="$PWD/configs/nvidia_icd_egl.json"
-vulkaninfo --summary | grep -E 'deviceName|driverName'
+python scripts/smoke_test.py --backend physx_cuda --num-envs 4 --steps 20
 ```
 
-验收输出必须包含 `NVIDIA GeForce RTX 5090`，不能只有 `llvmpipe`。之后运行：
+完整的数据回放、训练和评测命令见 [docs/reproduce.md](docs/reproduce.md)。
 
-```bash
-python scripts/smoke_test.py --backend physx_cuda --num-envs 64 --steps 120 --video outputs/smoke.mp4
-```
+## 文档
 
-成功标准：
+- [PushCube 实验日志与失败分析](docs/experiment_log.md)
+- [PickCube flow world model 实验记录](docs/pickcube_flow_experiment.md)
+- [复现实验命令](docs/reproduce.md)
 
-- 输出 `PushCube-v1` observation/action 结构；
-- 完成 120 步，无 Vulkan 或 CUDA 报错；
-- 生成 `outputs/smoke.mp4`；
-- 输出平均 step FPS。
-
-## 3. 下载并回放官方示范
-
-```bash
-python -m mani_skill.utils.download_demo "PushCube-v1"
-```
-
-下载后，根据命令输出定位 `trajectory.h5`，再执行：
-
-```bash
-python -m mani_skill.trajectory.replay_trajectory \
-  --traj-path demos/rigid_body/PushCube-v1/trajectory.h5 \
-  --use-first-env-state \
-  -b physx_cuda \
-  -c pd_joint_delta_pos \
-  -o rgb \
-  --record-rewards \
-  --save-traj \
-  --save-video
-```
-
-原始示范为压缩轨迹，通常不直接存 RGB；回放步骤会利用初始状态、动作和随机种子重新生成视觉观测。
-
-## 4. 检查数据
-
-```bash
-python scripts/inspect_h5.py path/to/replayed_trajectory.h5
-```
-
-## 5. 训练第一版 action-conditioned latent dynamics
-
-先用小规模回放数据验证端到端训练是否正确：
-
-```bash
-python scripts/train_dynamics.py \
-  --data /root/.maniskill/demos/PushCube-v1/motionplanning/trajectory.rgb+state.pd_joint_pos.physx_cuda.h5 \
-  --epochs 5 --batch-size 32 --image-size 64 \
-  --output outputs/baseline_debug
-```
-
-模型同时优化当前帧重建、下一帧预测、latent dynamics 和状态预测。训练完成后会在 output 目录保存 `last.pt` 与 `metrics.json`；指标定义、实验日志和已解决问题见 [`docs/`](docs/)。
-
-下一阶段将在确认字段结构后实现：
-
-1. RGB + proprioception + action 数据加载器；
-2. 视觉 encoder 与 action-conditioned latent dynamics；
-3. 单步与多步 rollout 训练；
-4. 基于 goal cost 的 CEM 动作规划；
-5. rollout horizon 和 action-conditioning 消融。
-
-## 简历更新门槛
-
-只有在对应结果真实生成后，才将简历中的“计划”替换为：
-
-- 已跑通 GPU 并行仿真和 RGB 轨迹回放；
-- 已形成 observation-action-next observation 数据集；
-- 已完成 latent dynamics 训练与多步 rollout；
-- 已完成 CEM 闭环控制和成功率评测。
+大型 HDF5 数据、checkpoint 和 MP4 视频被 `.gitignore` 排除；它们需在本地或云端按文档生成。

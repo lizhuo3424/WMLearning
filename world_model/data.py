@@ -84,3 +84,50 @@ class PushCubeTransitionDataset(Dataset):
 
     def __del__(self) -> None:
         self.close()
+
+
+@dataclass(frozen=True)
+class RolloutIndex:
+    trajectory: str
+    step: int
+
+
+class PushCubeRolloutDataset(PushCubeTransitionDataset):
+    """Fixed-horizon sequences for free latent rollout training.
+
+    An item begins at ``t`` and contains H actions plus targets through
+    ``t + H``.  No sequence crosses a demonstration boundary.
+    """
+
+    def __init__(self, path: str | Path, horizon: int, image_size: int = 64) -> None:
+        if horizon < 1:
+            raise ValueError("horizon must be positive")
+        self.path = str(path)
+        self.image_size = image_size
+        self.horizon = horizon
+        self._file: h5py.File | None = None
+        self.indices: list[RolloutIndex] = []
+        with h5py.File(self.path, "r") as file:
+            for trajectory in sorted(key for key in file if key.startswith("traj_")):
+                action_count = len(file[f"{trajectory}/actions"])
+                self.indices.extend(
+                    RolloutIndex(trajectory, step) for step in range(max(0, action_count - horizon + 1))
+                )
+        if not self.indices:
+            raise ValueError(f"No {horizon}-step rollouts found in {self.path}")
+
+    def __getitem__(self, item: int) -> dict[str, torch.Tensor]:
+        index = self.indices[item]
+        group = self._handle()[index.trajectory]
+        start, stop = index.step, index.step + self.horizon
+        images = group[self.image_key]
+        states = group[self.state_key]
+        return {
+            "image": self._image_to_tensor(images[start], self.image_size),
+            "state": torch.from_numpy(states[start].astype(np.float32)),
+            "actions": torch.from_numpy(group["actions"][start:stop].astype(np.float32)),
+            "next_images": torch.stack([
+                self._image_to_tensor(images[step], self.image_size) for step in range(start + 1, stop + 1)
+            ]),
+            "next_states": torch.from_numpy(states[start + 1:stop + 1].astype(np.float32)),
+        }

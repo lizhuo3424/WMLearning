@@ -47,6 +47,24 @@
 
 结果边界：这是离线、单步预测的 sanity baseline；数值说明训练管线和 held-out trajectory 上的预测损失均稳定下降，但尚未测试多步 rollout、action ablation 或 CEM 闭环控制，不能将上述 MSE 解释成机器人任务成功率。
 
+### 多步 free rollout 与动作消融（当前结果）
+
+使用同一 checkpoint，在 10 条 held-out trajectory 的 596 个起点进行 free latent rollout。每一步把上一步预测的 latent 和 state 再输入 dynamics；`zero_action` 消融仅将输入动作设为零，其余模型权重、起点和评价完全相同。
+
+| Horizon | Action-conditioned pixel MSE | Zero-action pixel MSE | Action-conditioned state MSE | Zero-action state MSE |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 0.00477 | 0.00480 | 0.00051 | 0.00125 |
+| 5 | 0.00491 | 0.00519 | 0.00345 | 0.01467 |
+| 10 | 0.00508 | 0.00580 | 0.00652 | 0.03778 |
+
+在 10 步时，保留动作条件使状态 MSE 相比 zero-action 低约 82.7%，像素 MSE 低约 12.3%。这支持“模型会使用 action 来预测状态转移”的判断；但仍是离线 prediction 证据，下一阶段必须通过 CEM 闭环 success rate 验证控制收益。
+
+### CEM 闭环调试（负结果，保留）
+
+使用 learned dynamics 进行 CEM 搜索，并在真实 PushCube 环境以 `pd_joint_pos` 闭环执行。初版错误地将动作裁剪为 `[-1, 1]`；修复为从 replay HDF5 提取的示范动作均值、方差和边界后，seed 42 的单回合仍未成功：环境 50 步截断，cube-goal 初始/最终二维距离均约 `0.200`。
+
+结论：目前的单步 CNN/MLP 模型可用于动作条件预测消融，但不足以做有效长程 CEM 控制。后续改进顺序是：先扩增至完整 1,000 条示范；训练 multi-step rollout loss；以 behavior-cloning policy 产生 CEM warm start；再在相同 seeds 下报告 CEM、BC 和 random 的 success rate / final distance 对照。
+
 ### 已确认数据契约
 
 训练样本是严格的一步转移：`(o_t, s_t, a_t) -> (o_{t+1}, s_{t+1})`。
@@ -68,3 +86,41 @@
 2. 扩增回放示范并按 trajectory 划分训练/验证集；
 3. 增加 5/10 步 latent rollout drift 与像素预测指标；
 4. 在 learned dynamics 上加入 CEM，并报告任务 success rate。
+
+### 控制基线预检（100 条轨迹，2026-09-14）
+
+- 为区分“数据/动作定义问题”和“世界模型规划问题”，新增 `state -> pd_joint_pos action` 的 MLP 行为克隆（BC）基线。它读取模拟器完整状态（包含方块、目标和 TCP 位姿），因此只作为控制可学习性的诊断，**不是**视觉世界模型结果。
+- 按完整轨迹拆分：87 条训练、10 条验证，6,119 / 751 transitions；第 10 epoch 验证 raw action MSE 为 `0.0019761`。
+- 但在真实闭环的 5 个固定种子回合（42--46）中，成功率为 `0/5`，平均最终 cube-goal 距离为 `0.200004 m`，几乎没有推动方块。
+- 结论：当前 100 条数据的一步 MLP-BC 仍不能恢复接触操作中的时序策略；不能用离线动作 MSE 替代真实控制成功率。全量数据完成后将改用 action chunk / history-conditioned policy，并与 BC、CEM 统一对比。
+
+### 全量数据与多步世界模型（975 条成功回放）
+
+- 请求回放 1,000 条官方 motion-planning 示范，成功保存 975 条（97.5%）。按整条轨迹固定切分为训练 / held-out trajectory，避免相邻帧数据泄漏。
+- 单步 CNN autoencoder（128-d latent）+ action-conditioned MLP dynamics 训练 20 epochs：held-out `next-image MSE = 0.000832`、`state MSE = 0.002823`。
+- 以上 checkpoint 初始化 5-step free-rollout 微调后，在 98 条 held-out trajectories、5,888 个起点上复测：
+
+| Horizon | Action-conditioned pixel MSE | Zero-action pixel MSE | Action-conditioned state MSE | Zero-action state MSE |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 0.000636 | 0.005035 | 0.000662 | 0.016723 |
+| 5 | 0.000821 | 0.012171 | 0.002776 | 0.300130 |
+| 10 | 0.001270 | 0.030323 | 0.005832 | 5.358248 |
+
+- 解释边界：10-step conditioned state MSE 明显低于 zero-action，说明模型没有忽略 action；这仍是**离线预测**结果，不能等价为控制成功。
+- 原始 terminal-distance CEM 在 10 个固定种子中成功率 `0/10`，平均最终 cube-goal 距离 `0.227221 m`；对齐环境分阶段稠密奖励后的 3 回合调试也为 `0/3`，其中 1 回合出现模型利用导致的方块远离目标。结论是当前 deterministic dynamics + unconstrained CEM 尚不适合报告为可用控制器。
+- 全量 raw-action BC（50 epochs）在 held-out action MSE 上达到 `0.0004321`，但真实闭环 20 个种子仍为 `0/20`、平均最终距离 `0.199994 m`。这再次证明不能以离线 action MSE 替代任务 success；现正评测 joint-delta 表示，并准备使用 history / action-chunk 形式改善接触控制。
+
+### 评测协议修正与统一 100-step 对照
+
+- 发现官方 motion-planning 示范长度为 61--151 steps（中位数 69），而 `PushCube-v1` 的 Gym 注册默认 `max_episode_steps=50`。先前 BC/CEM/kNN 闭环评测实际在第 50 步被截断，因此其中的 0% success **不能作为控制失败结论**。
+- 所有后续控制评测显式传入 `max_episode_steps=100`，并以固定 seeds 42--61 重跑。100-step 上限只用于与官方示范时长匹配；所有报告都会明确标示该协议。
+
+| 方法 | 观测 | 回合数 | 成功率 | 平均最终 cube-goal 距离 |
+| --- | --- | ---: | ---: | ---: |
+| kNN action-chunk retrieval（k=1, chunk=2） | simulator privileged state | 20 | **70%** | **0.120881 m** |
+| raw-action MLP BC | simulator privileged state | 20 | 0% | 0.199994 m |
+| joint-delta MLP BC | simulator privileged state | 20 | 0% | 0.474117 m |
+| terminal-cost CEM + learned visual dynamics | RGB + state | 10 | 0% | 0.329589 m |
+
+- kNN action-chunk 的 70% 表明：专家数据覆盖、状态接口和 100-step 控制协议均可工作。对照中，逐步检索为 60%，执行 2 步连续专家动作后再检索提升至 70%；它是非参数、特权状态的**诊断上界/基线**，不可表述为视觉世界模型成功率。
+- CEM 仍有 model exploitation，下一阶段应使用动作序列检索/BC warm-start、uncertainty penalty 或 ensemble dynamics，而不是扩大无约束的动作采样范围。
