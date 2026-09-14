@@ -31,6 +31,22 @@
 
 解释边界：损失下降证明本轮实现可训练、且对未见完整轨迹有初步泛化；但仅 10 条示范、验证集 1 条轨迹，不能据此声称“达到控制效果”或报告规划成功率。下一轮应扩展数据，并报告均值与方差。
 
+### 100-trajectory baseline（当前可复现结果）
+
+- 回放请求 100 条官方 motion-planning 示范，成功保存 97 条（97.0%）；输出视觉轨迹 HDF5 为 38.1 MB。
+- 按完整 trajectory 固定切分为 87 条训练 / 10 条验证，分别为 6,119 / 751 个转移；不会发生同一轨迹帧泄漏。
+- CNN autoencoder（128-d latent）+ action-conditioned MLP dynamics，输入 64 x 64 RGB，batch size 64，10 epochs，2 DataLoader workers。
+
+| 验证指标 | Epoch 1 | Epoch 10 |
+| --- | ---: | ---: |
+| total loss | 0.01952 | 0.01207 |
+| next-image MSE | 0.00811 | 0.00491 |
+| reconstruction MSE | 0.00809 | 0.00489 |
+| latent MSE | 0.000048 | 0.000002 |
+| state MSE | 0.00328 | 0.00226 |
+
+结果边界：这是离线、单步预测的 sanity baseline；数值说明训练管线和 held-out trajectory 上的预测损失均稳定下降，但尚未测试多步 rollout、action ablation 或 CEM 闭环控制，不能将上述 MSE 解释成机器人任务成功率。
+
 ### 已确认数据契约
 
 训练样本是严格的一步转移：`(o_t, s_t, a_t) -> (o_{t+1}, s_{t+1})`。
